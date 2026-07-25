@@ -1,0 +1,8 @@
+node_modules/
+dist/
+src/widgets/node_modules/
+src/widgets/.next/
+src/widgets/out/
+__pycache__/
+*.log
+.DS_Store

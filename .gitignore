@@ -1,0 +1,29 @@
+# Dependencies
+node_modules/
+.pnpm-store/
+
+# Build Outputs
+dist/
+.next/
+out/
+build/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.venv/
+venv/
+ENV/
+
+# Logs & Environment
+*.log
+.env
+.env.local
+
+# IDE & OS
+.vscode/
+.idea/
+.DS_Store
+*.swp

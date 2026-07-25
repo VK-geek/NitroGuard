@@ -1,0 +1,54 @@
+<mujoco model="amr_factory">
+  <option gravity="0 0 -9.81" timestep="0.005"/>
+
+  <asset>
+    <texture name="grid" type="2d" builtin="checker" rgb1=".15 .15 .15" rgb2=".25 .25 .25" width="512" height="512"/>
+    <material name="grid_mat" texture="grid" texrepeat="1 1" texuniform="true"/>
+    <material name="amr_mat" rgba="0.2 0.6 1.0 1.0"/>
+    <material name="press_mat" rgba="1.0 0.2 0.2 0.6"/>
+    <material name="cabinet_mat" rgba="0.9 0.7 0.1 0.6"/>
+    <material name="conveyor_mat" rgba="0.6 0.2 0.9 0.6"/>
+  </asset>
+
+  <worldbody>
+    <!-- Ambient lighting -->
+    <light name="top_light" pos="7.5 7.5 12" dir="0 0 -1" directional="true" diffuse=".8 .8 .8" specular=".2 .2 .2"/>
+    <light name="fill_light" pos="0 0 6" dir="0 0 -1" directional="true" diffuse=".3 .3 .3"/>
+
+    <!-- 15m x 15m Factory Floor -->
+    <geom name="floor" type="plane" size="15 15 0.1" material="grid_mat"/>
+
+    <!-- AMR-01: Cylindrical Autonomous Mobile Robot -->
+    <!-- freejoint = holonomic 6-DOF body, simplest path to velocity control -->
+    <body name="amr" pos="2 2 0.2">
+      <freejoint name="amr_freejoint"/>
+      <geom name="amr_body" type="cylinder" size="0.4 0.2" material="amr_mat" mass="20"/>
+    </body>
+
+    <!-- OBSTACLE 1: Industrial Robotic Press (hazard radius 2.0m at 5,5) -->
+    <body name="pressA" pos="5 5 0.5">
+      <geom name="press_geom" type="cylinder" size="2.0 1.0" material="press_mat"/>
+    </body>
+
+    <!-- OBSTACLE 2: High Voltage Cabinet (hazard radius 1.5m at 10,3) -->
+    <body name="cabinet" pos="10 3 0.5">
+      <geom name="cabinet_geom" type="cylinder" size="1.5 1.0" material="cabinet_mat"/>
+    </body>
+
+    <!-- OBSTACLE 3: Automated Gantry/Conveyor (hazard radius 2.2m at 7,11) -->
+    <body name="conveyor" pos="7 11 0.5">
+      <geom name="conveyor_geom" type="cylinder" size="2.2 1.25" material="conveyor_mat"/>
+    </body>
+  </worldbody>
+
+  <!--
+    Direct force actuators on freejoint: gear vector selects which DOF is driven.
+    gear="1 0 0 0 0 0" → X-axis force (linearVelocity * cos(heading))
+    gear="0 1 0 0 0 0" → Y-axis force (linearVelocity * sin(heading))
+    Holonomic approximation: honest simplification for hackathon demo.
+  -->
+  <actuator>
+    <general name="fx" joint="amr_freejoint" gear="1 0 0 0 0 0" ctrllimited="true" ctrlrange="-50 50"/>
+    <general name="fy" joint="amr_freejoint" gear="0 1 0 0 0 0" ctrllimited="true" ctrlrange="-50 50"/>
+  </actuator>
+</mujoco>
