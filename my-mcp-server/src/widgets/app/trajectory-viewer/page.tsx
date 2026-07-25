@@ -236,7 +236,13 @@ export default function TrajectoryViewer() {
           await fetch(`http://localhost:${port}/apply_command`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ linearVelocity: speed, angularVelocity: 0.0, nstep: 10 })
+            body: JSON.stringify({
+              targetX: lastStep ? lastStep.corrected.x : targetX,
+              targetY: lastStep ? lastStep.corrected.y : targetY,
+              linearVelocity: speed,
+              angularVelocity: 0.0,
+              nstep: 20
+            })
           });
           break;
         } catch {}
