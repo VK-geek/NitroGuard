@@ -17,6 +17,12 @@ __pycache__/
 venv/
 ENV/
 
+# Reference & Research Scratchpad Docs (Exclude from Shipping)
+research files/
+*.md
+!README.md
+sim_3d_bridge.py
+
 # Logs & Environment
 *.log
 .env
