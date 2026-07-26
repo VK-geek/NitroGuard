@@ -1,13 +1,11 @@
 import { McpApp, Module, ConfigModule } from '@nitrostack/core';
-import { CalculatorModule } from './modules/calculator/calculator.module.js';
 import { RoboticsModule } from './modules/robotics/robotics.module.js';
 import { SystemHealthCheck } from './health/system.health.js';
 
 /**
- * Root Application Module
- * 
- * This is the main module that bootstraps the MCP server.
- * It registers all feature modules and health checks.
+ * Root Application Module — NitroGuard AI Safety Gateway
+ *
+ * Bootstraps the NitroStack MCP server with the Robotics safety module.
  */
 @McpApp({
   module: AppModule,
@@ -21,14 +19,12 @@ import { SystemHealthCheck } from './health/system.health.js';
 })
 @Module({
   name: 'app',
-  description: 'Root application module',
+  description: 'NitroGuard AI Safety Gateway for Autonomous Mobile Robots',
   imports: [
     ConfigModule.forRoot(),
-    CalculatorModule,
     RoboticsModule
   ],
   providers: [
-    // Health Checks
     SystemHealthCheck,
   ]
 })
