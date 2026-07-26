@@ -57,3 +57,16 @@ Thumbs.db
 .vscode/
 factory.xml
 record_demo.sh
+
+# IDE / AI assistant hidden skill directories
+.antigravity/
+.claude/
+.codex/
+.copilot/
+.cursor/
+.gemini/
+.opencode/
+
+# Stray docs
+"UI Widgets Guide error handling.md"
+UI Widgets Guide error handling.md
