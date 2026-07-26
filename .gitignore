@@ -17,21 +17,41 @@ __pycache__/
 venv/
 ENV/
 
-# Reference & Research Scratchpad Docs (Exclude from Shipping)
+# Reference & Research Scratchpad Docs — excluded from final submission
 research files/
-*.md
+nitrodocs cli nd typescript.md
+nitroguard_transfer_context.md
+nitrostack_master_context.md
+NitroStack_Studio_Handbook.md
+nitrostack template .md
+"UI Widgets Guide error handling.md"
+dos and donts .md
+
+# Keep architecture doc and README
 !README.md
 !NITROGUARD_ARCHITECTURE_AND_PIPELINE.md
-*.zip
+
+# Deprecated bridge files
 sim_3d_bridge.py
+my-mcp-server/sim_3d_bridge.py
+my-mcp-server/factory.xml
+my-mcp-server/sr
+my-mcp-server/HANDOFF_2D_WINDOWS.md
+my-mcp-server/HANDOFF_3D_UBUNTU_MUJOCO.md
+
+# ZIP Archives
+*.zip
 
 # Logs & Environment
 *.log
 .env
 .env.local
+!.env.example
 
-# IDE & OS
-.vscode/
-.idea/
+# OS Files
 .DS_Store
-*.swp
+Thumbs.db
+
+# IDE
+.idea/
+.vscode/
