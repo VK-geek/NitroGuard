@@ -21,6 +21,8 @@ ENV/
 research files/
 *.md
 !README.md
+!NITROGUARD_ARCHITECTURE_AND_PIPELINE.md
+*.zip
 sim_3d_bridge.py
 
 # Logs & Environment

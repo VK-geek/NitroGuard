@@ -90,12 +90,32 @@ export default function TrajectoryViewer() {
 
   const data = localOutput || sdkOutput || fallbackData;
 
-  // Track position
+  // Track position from dataset
   useEffect(() => {
     if (data.steps && data.steps.length > 0) {
       setCurrentCoords(data.steps[data.steps.length - 1].corrected);
     }
   }, [data]);
+
+  // Live sync telemetry from MuJoCo Python Bridge
+  useEffect(() => {
+    const interval = setInterval(async () => {
+      for (const port of [8000, 8001]) {
+        try {
+          const res = await fetch(`http://localhost:${port}/robot_state`);
+          if (res.ok) {
+            const state = await res.json();
+            if (state && typeof state.x === 'number' && typeof state.y === 'number') {
+              setCurrentCoords({ x: state.x, y: state.y, z: state.z || 0 });
+            }
+            break;
+          }
+        } catch {}
+      }
+    }, 200);
+
+    return () => clearInterval(interval);
+  }, []);
 
   // Coordinate Projectors
   const project2D = (x: number, y: number) => {
@@ -125,62 +145,115 @@ export default function TrajectoryViewer() {
       { id: 'conveyor', label: 'Automated Gantry', x: 7.0, y: 11.0, radius: 2.2 }
     ];
 
-    const stepsCount = 10;
+    const stepsCount = 12;
     const steps: PathStep[] = [];
     let wasCorrected = false;
     let totalCorrectionDistance = 0;
     let maxRiskLevel: 'NONE' | 'LOW' | 'MEDIUM' | 'HIGH' | 'CRITICAL' = 'NONE';
     let activeObs: any = undefined;
-
     const riskRank = { NONE: 0, LOW: 1, MEDIUM: 2, HIGH: 3, CRITICAL: 4 };
 
+    // 1. Generate nominal straight-line points
+    const nominalPts: { x: number; y: number }[] = [];
     for (let i = 0; i <= stepsCount; i++) {
       const ratio = i / stepsCount;
-      const nomX = Number((startX + ratio * (targetX - startX)).toFixed(2));
-      const nomY = Number((startY + ratio * (targetY - startY)).toFixed(2));
-      let corrX = nomX;
-      let corrY = nomY;
-      let stepCorrected = false;
-      let stepCorrDist = 0;
-      let stepMinDist = Infinity;
+      nominalPts.push({
+        x: Number((startX + ratio * (targetX - startX)).toFixed(2)),
+        y: Number((startY + ratio * (targetY - startY)).toFixed(2))
+      });
+    }
 
-      for (const obs of obstacles) {
-        const minClearance = obs.radius + margin;
-        const dx = corrX - obs.x;
-        const dy = corrY - obs.y;
-        const dist = Math.sqrt(dx * dx + dy * dy);
-        const edgeDist = dist - obs.radius;
-        if (edgeDist < stepMinDist) stepMinDist = edgeDist;
+    // 2. Identify obstacles that intersect the nominal line segment
+    const dx = targetX - startX;
+    const dy = targetY - startY;
+    const lineLen = Math.hypot(dx, dy);
+    const lineUnitX = lineLen > 1e-4 ? dx / lineLen : 0;
+    const lineUnitY = lineLen > 1e-4 ? dy / lineLen : 0;
+    // Perpendicular normal to the nominal line (left side)
+    const normX = -lineUnitY;
+    const normY = lineUnitX;
 
-        if (dist < minClearance) {
-          stepCorrected = true;
-          wasCorrected = true;
-          activeObs = obs;
-          const unitX = dist > 1e-4 ? dx / dist : 1.0;
-          const unitY = dist > 1e-4 ? dy / dist : 0.0;
-          corrX = Number((obs.x + unitX * minClearance).toFixed(2));
-          corrY = Number((obs.y + unitY * minClearance).toFixed(2));
-          stepCorrDist = Number(Math.sqrt((corrX - nomX) ** 2 + (corrY - nomY) ** 2).toFixed(2));
-          totalCorrectionDistance += stepCorrDist;
+    const correctedPts: { x: number; y: number; corrected: boolean; corrDist: number }[] = nominalPts.map(p => ({
+      x: p.x,
+      y: p.y,
+      corrected: false,
+      corrDist: 0
+    }));
+
+    for (const obs of obstacles) {
+      const minClearance = obs.radius + margin;
+
+      // Project obstacle center onto nominal line
+      const vX = obs.x - startX;
+      const vY = obs.y - startY;
+      const projDist = vX * lineUnitX + vY * lineUnitY;
+      const clampedProj = Math.max(0, Math.min(lineLen, projDist));
+
+      // Closest point on nominal line segment to obstacle center
+      const closeX = startX + clampedProj * lineUnitX;
+      const closeY = startY + clampedProj * lineUnitY;
+      const distToCenter = Math.hypot(closeX - obs.x, closeY - obs.y);
+
+      if (distToCenter < minClearance) {
+        wasCorrected = true;
+        activeObs = obs;
+
+        // Determine consistent deflection side (left or right of nominal line)
+        const sideDot = (obs.x - startX) * normX + (obs.y - startY) * normY;
+        const pushSide = sideDot >= 0 ? -1.0 : 1.0; // push to opposite side of center
+
+        // Apply smooth tangent arc deflection for all points inside or near the clearance circle
+        for (let i = 0; i <= stepsCount; i++) {
+          const nom = nominalPts[i];
+          const dToObs = Math.hypot(nom.x - obs.x, nom.y - obs.y);
+
+          if (dToObs < minClearance) {
+            // Calculate how deep into the obstacle zone this point is (0 at edge, 1 at center)
+            const penetration = (minClearance - dToObs) / minClearance;
+            // Push consistently along the perpendicular normal so path wraps smoothly around exterior
+            const shiftAmount = (minClearance - distToCenter + 0.3) * (1 - Math.pow(1 - penetration, 2));
+
+            const newX = Number((nom.x + normX * pushSide * shiftAmount).toFixed(2));
+            const newY = Number((nom.y + normY * pushSide * shiftAmount).toFixed(2));
+            const cDist = Number(Math.hypot(newX - nom.x, newY - nom.y).toFixed(2));
+
+            correctedPts[i].x = newX;
+            correctedPts[i].y = newY;
+            correctedPts[i].corrected = true;
+            correctedPts[i].corrDist = cDist;
+            totalCorrectionDistance += cDist;
+          }
         }
+      }
+    }
+
+    // 3. Assemble steps with risk levels
+    for (let i = 0; i <= stepsCount; i++) {
+      const nom = nominalPts[i];
+      const corr = correctedPts[i];
+
+      let stepMinDist = Infinity;
+      for (const obs of obstacles) {
+        const d = Math.hypot(corr.x - obs.x, corr.y - obs.y) - obs.radius;
+        if (d < stepMinDist) stepMinDist = d;
       }
 
       let stepRisk: 'NONE' | 'LOW' | 'MEDIUM' | 'HIGH' | 'CRITICAL' = 'NONE';
-      if (stepMinDist < 0.5) stepRisk = 'CRITICAL';
-      else if (stepMinDist < 1.0) stepRisk = 'HIGH';
-      else if (stepMinDist < 1.5) stepRisk = 'MEDIUM';
-      else if (stepMinDist < 2.0) stepRisk = 'LOW';
+      if (stepMinDist < 0.3) stepRisk = 'CRITICAL';
+      else if (stepMinDist < 0.6) stepRisk = 'HIGH';
+      else if (stepMinDist < 1.0) stepRisk = 'MEDIUM';
+      else if (stepMinDist < 1.5) stepRisk = 'LOW';
 
       if (riskRank[stepRisk] > riskRank[maxRiskLevel]) {
         maxRiskLevel = stepRisk;
       }
 
       steps.push({
-        nominal: { x: nomX, y: nomY, z: 0 },
-        corrected: { x: corrX, y: corrY, z: 0 },
-        correctedFlag: stepCorrected,
+        nominal: { x: nom.x, y: nom.y, z: 0 },
+        corrected: { x: corr.x, y: corr.y, z: 0 },
+        correctedFlag: corr.corrected,
         risk: stepRisk,
-        correctionDistance: stepCorrDist
+        correctionDistance: corr.corrDist
       });
     }
 
@@ -200,25 +273,32 @@ export default function TrajectoryViewer() {
     const selectedMode = mode || data.safetyMode;
     setIsCalling(true);
 
-    try {
-      // 1. Try MCP Tool call via SDK
-      const res = await callTool('execute_safe_movement', {
-        targetX,
-        targetY,
-        safetyMode: selectedMode,
-        metadata: { 'x-api-key': 'nitroguard-secret-key' }
-      });
+    let parsed: TrajectoryData | null = null;
 
-      let parsed: TrajectoryData | null = null;
-      if (res && !res.isError) {
-        if (res.structuredContent) {
-          parsed = res.structuredContent as TrajectoryData;
-        } else if (typeof res.result === 'string') {
-          try { parsed = JSON.parse(res.result); } catch {}
+    try {
+      // 1. Try MCP tool call if running inside an iframe host
+      try {
+        const callToolPromise = callTool('execute_safe_movement', {
+          targetX,
+          targetY,
+          safetyMode: selectedMode,
+          metadata: { 'x-api-key': 'nitroguard-secret-key' }
+        });
+        const timeoutPromise = new Promise((resolve) => setTimeout(() => resolve(null), 200));
+        const res = (await Promise.race([callToolPromise, timeoutPromise])) as any;
+
+        if (res && !res.isError) {
+          if (res.structuredContent) {
+            parsed = res.structuredContent as TrajectoryData;
+          } else if (typeof res.result === 'string') {
+            try { parsed = JSON.parse(res.result); } catch {}
+          }
         }
+      } catch {
+        // Standalone preview mode — fallback to local math
       }
 
-      // 2. Fallback to local computation for standalone preview mode
+      // 2. Local CBF computation fallback
       if (!parsed) {
         parsed = computeLocalCBF(currentCoords.x, currentCoords.y, targetX, targetY, selectedMode);
       }
@@ -229,16 +309,21 @@ export default function TrajectoryViewer() {
         setCurrentCoords(lastStep.corrected);
       }
 
-      // 3. Dispatch HTTP velocity command directly to Python MuJoCo bridge
+      // 3. ALWAYS dispatch HTTP command directly to MuJoCo Python Bridge
+      const finalX = lastStep ? lastStep.corrected.x : targetX;
+      const finalY = lastStep ? lastStep.corrected.y : targetY;
       const speed = selectedMode === 'SAFEST' ? 0.6 : 1.2;
+
       for (const port of [8000, 8001]) {
         try {
           await fetch(`http://localhost:${port}/apply_command`, {
             method: 'POST',
+            mode: 'cors',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({
-              targetX: lastStep ? lastStep.corrected.x : targetX,
-              targetY: lastStep ? lastStep.corrected.y : targetY,
+              targetX: finalX,
+              targetY: finalY,
+              waypoints: parsed ? parsed.steps.map((s) => s.corrected) : [],
               linearVelocity: speed,
               angularVelocity: 0.0,
               nstep: 20
@@ -292,6 +377,7 @@ export default function TrajectoryViewer() {
     targetY = Math.max(0, Math.min(15, targetY));
 
     setClickIndicator({ x: clickX, y: clickY });
+    // All 3 ways go through LLM (Llama 3)
     await handleSendChat(`Navigate AMR-01 to clicked coordinate target (${targetX}, ${targetY})`);
   };
 
@@ -300,63 +386,88 @@ export default function TrajectoryViewer() {
     if (!textToSend.trim() || isCalling || estopActive) return;
 
     const timeStr = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
-    setChatMessages((prev) => [...prev, { sender: 'user', text: textToSend, time: timeStr }]);
     if (!customText) setPromptInput('');
 
-    let targetX = 5.2;
-    let targetY = 5.5;
-    let llamaReasoning = '';
+    // ALWAYS show Llama thinking state for all inputs
+    setChatMessages((prev) => [
+      ...prev,
+      { sender: 'user', text: textToSend, time: timeStr },
+      { sender: 'assistant', text: '🧠 Llama is thinking & planning trajectory... ⏳', time: timeStr }
+    ]);
+
+    let targetX = 2.0;
+    let targetY = 2.0;
+    let llamaReasoning = 'Navigating to specified coordinates';
+    let usedLlama = false;
     const lower = textToSend.toLowerCase();
 
-    // 1. Try querying local Ollama (Llama model) at http://localhost:11434
+    // Query Llama 3 (Ollama API) grounded in live MCP Resources
     try {
-      const systemPrompt = `You are an AI AMR Navigation Planner for a factory workspace.
-Predefined factory locations:
-- Press Cell A: (5.2, 5.5)
+      const systemPrompt = `You are an AI AMR Navigation Planner for a 15x15m factory workspace.
+
+[MCP Resource Loaded: sim://factory-layout]
+Grid dimensions: 0-15m x 0-15m
+Machine Centers:
+- Press Cell A: (5.0, 5.0)
 - High Voltage Cabinet: (10.0, 3.0)
 - Automated Gantry/Conveyor: (7.0, 11.0)
+- Home Base: (2.0, 2.0)
+
+[MCP Resource Loaded: sim://obstacle-map]
+Real-time hazard zones & circular physical barriers:
+- Press Cell A: center (5.0, 5.0), radius 2.0m, safety margin 0.5m (clearance 2.5m)
+- High Voltage Cabinet: center (10.0, 3.0), radius 1.5m, safety margin 0.5m (clearance 2.0m)
+- Automated Gantry: center (7.0, 11.0), radius 2.2m, safety margin 0.5m (clearance 2.7m)
+
+[MCP Resource Loaded: sim://robot-state]
+Current AMR Pose: (${currentCoords.x.toFixed(2)}, ${currentCoords.y.toFixed(2)}, z=0.3)
+Control Mode: ${data.safetyMode}
 
 User prompt: "${textToSend}"
 
-Respond ONLY with valid JSON in this exact structure:
-{"targetX": 5.2, "targetY": 5.5, "reasoning": "short 1-sentence reason"}`;
+Instructions:
+1. Parse the user prompt and extract target coordinates.
+2. If exact numbers are given, output those exact numbers as targetX and targetY.
+3. If a named machine is requested, output its raw center location (e.g. 5.0, 5.0 for Press Cell A).
+   NitroGuard's live Control Barrier Function (CBF) engine will intercept the raw target downstream and calculate the safe boundary vector.
+
+Respond ONLY with valid JSON in this exact format:
+{"targetX": 2.0, "targetY": 2.0, "reasoning": "short sentence describing mission intent"}`;
 
       const ollamaRes = await fetch('http://localhost:11434/api/generate', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          model: 'llama3', // or 'llama' / 'llama3.2'
-          prompt: systemPrompt,
-          stream: false
-        })
+        body: JSON.stringify({ model: 'llama3', prompt: systemPrompt, stream: false })
       });
 
       if (ollamaRes.ok) {
         const json = await ollamaRes.json();
-        const responseText = json.response || '';
-        const jsonMatch = responseText.match(/\{[\s\S]*\}/);
+        const jsonMatch = (json.response || '').match(/\{[\s\S]*?\}/);
         if (jsonMatch) {
-          const parsedLlama = JSON.parse(jsonMatch[0]);
-          if (parsedLlama.targetX !== undefined && parsedLlama.targetY !== undefined) {
-            targetX = Math.max(0, Math.min(15, parseFloat(parsedLlama.targetX)));
-            targetY = Math.max(0, Math.min(15, parseFloat(parsedLlama.targetY)));
-            llamaReasoning = parsedLlama.reasoning || '';
+          const parsed = JSON.parse(jsonMatch[0]);
+          if (parsed.targetX !== undefined && parsed.targetY !== undefined) {
+            targetX = Math.max(0, Math.min(15, parseFloat(parsed.targetX)));
+            targetY = Math.max(0, Math.min(15, parseFloat(parsed.targetY)));
+            llamaReasoning = parsed.reasoning || 'Goal selected by Llama planner';
+            usedLlama = true;
           }
         }
       }
     } catch {
-      // Local fallback if Ollama server is offline
-      if (lower.includes('press')) {
-        targetX = 5.2; targetY = 5.5;
+      // Fallback parser if Ollama service is unreachable
+      if (lower.includes('start') || lower.includes('charging') || lower.includes('home')) {
+        targetX = 2.0; targetY = 2.0;
+      } else if (lower.includes('press')) {
+        targetX = 5.0; targetY = 5.0;
       } else if (lower.includes('cabinet') || lower.includes('voltage')) {
         targetX = 10.0; targetY = 3.0;
       } else if (lower.includes('conveyor') || lower.includes('gantry')) {
         targetX = 7.0; targetY = 11.0;
       } else {
-        const numbers = textToSend.match(/(-?\d+(\.\d+)?)/g);
-        if (numbers && numbers.length >= 2) {
-          targetX = Math.max(0, Math.min(15, parseFloat(numbers[0])));
-          targetY = Math.max(0, Math.min(15, parseFloat(numbers[1])));
+        const numMatches = textToSend.match(/(-?\d+\.?\d*)/g);
+        if (numMatches && numMatches.length >= 2) {
+          targetX = Math.max(0, Math.min(15, parseFloat(numMatches[0])));
+          targetY = Math.max(0, Math.min(15, parseFloat(numMatches[1])));
         }
       }
     }
@@ -367,14 +478,19 @@ Respond ONLY with valid JSON in this exact structure:
 
     const result = await dispatchTargetCoordinates(targetX, targetY, targetMode);
     const reasoningText = llamaReasoning ? ` [Llama: "${llamaReasoning}"]` : '';
-    setChatMessages((prev) => [
-      ...prev,
-      {
-        sender: 'assistant',
-        text: `🦙 Llama planned goal (${targetX}, ${targetY}) [${targetMode}].${reasoningText} Interception result: ${result?.wasCorrected ? 'Deflected by CBF Vector' : 'Path Clear'}.`,
-        time: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
-      }
-    ]);
+    const prefix = usedLlama ? '🦙 Llama planned' : '📍 Direct target';
+
+    setChatMessages((prev) => {
+      const filtered = prev.filter((m) => !m.text.includes('thinking & planning'));
+      return [
+        ...filtered,
+        {
+          sender: 'assistant',
+          text: `${prefix} (${targetX}, ${targetY}) [${targetMode}].${reasoningText} Interception: ${result?.wasCorrected ? 'Deflected by CBF Vector' : 'Path Clear'}.`,
+          time: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+        }
+      ];
+    });
   };
 
   const toggleSafetyMode = async () => {
@@ -627,70 +743,103 @@ Respond ONLY with valid JSON in this exact structure:
               );
             })}
 
-            {/* Render Hazard Circles */}
+            {/* Render Detailed Visual Factory Equipment & Hazard Boundaries */}
             {data.obstacles.map((obs) => {
-              const zVal = obs.z ?? 0;
               const isViolated = data.wasCorrected && data.activeObstacle?.id === obs.id;
 
               if (viewType === '2D') {
                 const pos = project2D(obs.x, obs.y);
                 const radiusPixel = (obs.radius / 15) * 340;
                 const marginPixel = (activeMargin / 15) * 340;
+                const obsId = obs.id.toLowerCase();
 
                 return (
                   <g key={obs.id}>
-                    {/* Glowing Margin Outer Ring */}
+                    {/* Glowing CBF Safety Clearance Boundary */}
                     <circle
                       cx={pos.x}
                       cy={pos.y}
                       r={radiusPixel + marginPixel}
                       fill="none"
-                      stroke={isViolated ? 'rgba(239, 68, 68, 0.2)' : 'rgba(249, 115, 22, 0.15)'}
+                      stroke={isViolated ? 'rgba(239, 68, 68, 0.3)' : 'rgba(249, 115, 22, 0.2)'}
                       strokeWidth="1.5"
-                      strokeDasharray="3 5"
+                      strokeDasharray="4 4"
                     />
-                    {/* Obstacle Body */}
-                    <circle
-                      cx={pos.x}
-                      cy={pos.y}
-                      r={radiusPixel}
-                      fill={isViolated ? 'rgba(239, 68, 68, 0.08)' : 'rgba(249, 115, 22, 0.04)'}
-                      stroke={isViolated ? '#ef4444' : '#f97316'}
-                      strokeWidth="2"
-                    />
-                    {/* Center point */}
-                    <circle cx={pos.x} cy={pos.y} r="2" fill={isViolated ? '#ef4444' : '#f97316'} />
+
+                    {obsId.includes('press') ? (
+                      /* Top-down 2D Hydraulic Press Structure */
+                      <g>
+                        {/* Workbench Base */}
+                        <rect x={pos.x - 22} y={pos.y - 22} width="44" height="44" fill={isViolated ? 'rgba(239, 68, 68, 0.15)' : 'rgba(249, 115, 22, 0.1)'} stroke={isViolated ? '#ef4444' : '#f97316'} strokeWidth="1.5" rx="4" />
+                        {/* Corner Pillars */}
+                        <circle cx={pos.x - 16} cy={pos.y - 16} r="3" fill="#f8fafc" />
+                        <circle cx={pos.x + 16} cy={pos.y - 16} r="3" fill="#f8fafc" />
+                        <circle cx={pos.x - 16} cy={pos.y + 16} r="3" fill="#f8fafc" />
+                        <circle cx={pos.x + 16} cy={pos.y + 16} r="3" fill="#f8fafc" />
+                        {/* Press Head Block */}
+                        <rect x={pos.x - 12} y={pos.y - 12} width="24" height="24" fill={isViolated ? '#ef4444' : '#ea580c'} rx="2" />
+                        <text x={pos.x} y={pos.y + 34} fill="#fdba74" fontSize="9" fontWeight="700" textAnchor="middle">PRESS CELL A</text>
+                      </g>
+                    ) : obsId.includes('cabinet') ? (
+                      /* Top-down 2D High Voltage Electrical Cabinet */
+                      <g>
+                        <rect x={pos.x - 18} y={pos.y - 24} width="36" height="48" fill={isViolated ? 'rgba(239, 68, 68, 0.2)' : 'rgba(220, 38, 38, 0.15)'} stroke={isViolated ? '#ef4444' : '#dc2626'} strokeWidth="1.5" rx="4" />
+                        <line x1={pos.x - 18} y1={pos.y} x2={pos.x + 18} y2={pos.y} stroke="#f87171" strokeWidth="1" strokeDasharray="2 2" />
+                        {/* HMI Status Light */}
+                        <circle cx={pos.x - 10} cy={pos.y - 14} r="3" fill="#38bdf8" />
+                        <text x={pos.x} y={pos.y + 36} fill="#fca5a5" fontSize="9" fontWeight="700" textAnchor="middle">HV CABINET</text>
+                      </g>
+                    ) : (
+                      /* Top-down 2D Automated Conveyor Belt */
+                      <g>
+                        <rect x={pos.x - 34} y={pos.y - 14} width="68" height="28" fill={isViolated ? 'rgba(239, 68, 68, 0.15)' : 'rgba(234, 179, 8, 0.12)'} stroke={isViolated ? '#ef4444' : '#eab308'} strokeWidth="1.5" rx="4" />
+                        {/* Roller Strips */}
+                        <line x1={pos.x - 20} y1={pos.y - 14} x2={pos.x - 20} y2={pos.y + 14} stroke="#fde047" strokeWidth="1" />
+                        <line x1={pos.x} y1={pos.y - 14} x2={pos.x} y2={pos.y + 14} stroke="#fde047" strokeWidth="1" />
+                        <line x1={pos.x + 20} y1={pos.y - 14} x2={pos.x + 20} y2={pos.y + 14} stroke="#fde047" strokeWidth="1" />
+                        <text x={pos.x} y={pos.y + 26} fill="#fde047" fontSize="9" fontWeight="700" textAnchor="middle">CONVEYOR GANTRY</text>
+                      </g>
+                    )}
                   </g>
                 );
               } else {
+                /* 3D Isometric View Equipment Render */
                 const posBottom = project3D(obs.x, obs.y, 0);
-                const posTop = project3D(obs.x, obs.y, zVal || 1.5);
+                const posTop = project3D(obs.x, obs.y, 1.5);
                 const radiusPixel = obs.radius * 16;
                 const marginPixel = activeMargin * 16;
 
                 return (
                   <g key={obs.id}>
-                    {/* Floor circle projection */}
+                    {/* Floor Safety Circle */}
                     <ellipse
                       cx={posBottom.x}
                       cy={posBottom.y}
-                      rx={radiusPixel * Math.cos(Math.PI / 6)}
-                      ry={radiusPixel * Math.sin(Math.PI / 6)}
+                      rx={(radiusPixel + marginPixel) * Math.cos(Math.PI / 6)}
+                      ry={(radiusPixel + marginPixel) * Math.sin(Math.PI / 6)}
                       fill="none"
-                      stroke="rgba(249, 115, 22, 0.15)"
+                      stroke={isViolated ? 'rgba(239, 68, 68, 0.25)' : 'rgba(249, 115, 22, 0.15)'}
                       strokeWidth="1"
+                      strokeDasharray="3 3"
                     />
-                    {/* 3D Cylinder / Box height representation */}
-                    <line x1={posBottom.x} y1={posBottom.y} x2={posTop.x} y2={posTop.y} stroke={isViolated ? '#ef4444' : '#f97316'} strokeWidth="1" strokeDasharray="2 2" />
-                    {/* Obstacle Sphere boundary */}
-                    <circle
+
+                    {/* 3D Vertical Pillar Structural Lines */}
+                    <line x1={posBottom.x - 16} y1={posBottom.y} x2={posTop.x - 16} y2={posTop.y} stroke={isViolated ? '#ef4444' : '#f97316'} strokeWidth="1.5" />
+                    <line x1={posBottom.x + 16} y1={posBottom.y} x2={posTop.x + 16} y2={posTop.y} stroke={isViolated ? '#ef4444' : '#f97316'} strokeWidth="1.5" />
+
+                    {/* Elevated 3D Top Machine Block */}
+                    <ellipse
                       cx={posTop.x}
                       cy={posTop.y}
-                      r={radiusPixel}
-                      fill={isViolated ? 'rgba(239, 68, 68, 0.1)' : 'rgba(249, 115, 22, 0.05)'}
+                      rx={radiusPixel * Math.cos(Math.PI / 6)}
+                      ry={radiusPixel * Math.sin(Math.PI / 6)}
+                      fill={isViolated ? 'rgba(239, 68, 68, 0.2)' : 'rgba(249, 115, 22, 0.15)'}
                       stroke={isViolated ? '#ef4444' : '#f97316'}
-                      strokeWidth="1.5"
+                      strokeWidth="2"
                     />
+                    <text x={posTop.x} y={posTop.y - 12} fill="#fdba74" fontSize="9" fontWeight="700" textAnchor="middle">
+                      {obs.label || 'Machine Cell'}
+                    </text>
                   </g>
                 );
               }
